@@ -1,0 +1,47 @@
+version: '3'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.10-alpine
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+
+  postgres:
+    image: postgres:16.4-alpine
+    ports:
+      - "5432:5432" 
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+
+  migrate-postgres:
+    image: migrate/migrate
+    volumes:
+      - ./migrations/postgres:/migrations
+    command: ["-path", "/migrations", "-database", "postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable", "up"]
+    depends_on:
+      - postgres
+  # docker compose run migrate-postgres -path /migrations -database "postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable" force 001
+
+  migrate-clickhouse:
+    image: migrate/migrate
+    volumes:
+      - ./migrations/clickhouse:/migrations
+    command: ["-path", "/migrations", "-database", "clickhouse://default@clickhouse:9000/default", "up"]
+    depends_on:
+      - clickhouse
+  # docker compose run migrate-clickhouse -path /migrations -database "clickhouse://default:default@clickhouse:9000/default" force 001
+
+volumes:
+  clickhouse_data:
+  postgres_data:
