@@ -37,10 +37,10 @@ services:
     image: migrate/migrate
     volumes:
       - ./migrations/clickhouse:/migrations
-    command: ["-path", "/migrations", "-database", "clickhouse://default@clickhouse:9000/default", "up"]
+    command: ["-path", "/migrations", "-database", "clickhouse://default@clickhouse:9000/default?x-multi-statement=true", "up"]
     depends_on:
       - clickhouse
-  # docker compose run migrate-clickhouse -path /migrations -database "clickhouse://default:default@clickhouse:9000/default" force 001
+  # docker compose run migrate-clickhouse -path /migrations -database "clickhouse://default@clickhouse:9000/default?x-multi-statement=true" force 001
 
 volumes:
   clickhouse_data:
