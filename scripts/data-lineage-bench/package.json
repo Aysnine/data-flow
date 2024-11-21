@@ -1,0 +1,17 @@
+{
+  "name": "data-lineage-bench",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.8.1",
+    "dayjs": "^1.11.13",
+    "nodejs-polars": "^0.16.0",
+    "uuid": "^11.0.3"
+  }
+}
