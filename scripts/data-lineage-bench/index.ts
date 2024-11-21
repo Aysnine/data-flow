@@ -217,7 +217,8 @@ async function make_dwm_bugs(date: string) {
   const records = await dwdData.json();
 
   const dwmRecords = records.map((record: any) => {
-    const bugDays = +(parseFloat(record.total_days) * (0.8 + Math.random() * 0.4)).toFixed(2); // 80%-120%的total_days
+    const total_days = Number(record["metrics.values"][record["metrics.keys"].indexOf("total_days")] || 0);
+    const bugDays = +(total_days * (0.8 + Math.random() * 0.4)).toFixed(2); // 80%-120%的total_days
 
     return {
       metrics_date: date,
@@ -343,8 +344,8 @@ async function make_dws_projects(date: string): Promise<
 
     // Bug统计
     const projectBugData = bugData.filter((r: any) => r.project_id === projectId);
-    const bug_days = projectBugData.length > 0 ? projectBugData.map((r: any) => parseFloat(r.bug_days)) : [0];
-    const bug_avg_days = (bug_days.reduce((a: number, b: number) => a + b, 0) / bug_days.length).toFixed(2);
+    const bug_days = projectBugData.length > 0 ? projectBugData.map((r: any) => Number(r.bug_days) || 0) : [0];
+    const bug_avg_days = projectBugData.length > 0 ? (bug_days.reduce((a: number, b: number) => a + b, 0) / bug_days.length).toFixed(2) : "0.00";
 
     return {
       metrics_date: date,
