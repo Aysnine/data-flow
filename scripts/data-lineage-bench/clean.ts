@@ -21,6 +21,9 @@ async function clean() {
     query: "TRUNCATE TABLE dwd_git_commits",
   });
   await db.query({
+    query: "TRUNCATE TABLE dwm_bugs",
+  });
+  await db.query({
     query: "TRUNCATE TABLE dws_projects",
   });
   await db.query({
