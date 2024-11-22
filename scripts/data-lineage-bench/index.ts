@@ -357,7 +357,7 @@ async function make_dws_projects(date: string) {
               ROW_NUMBER()
                 OVER (PARTITION BY commit_id ORDER BY data_created_at DESC) as rn
             FROM dwd_git_commits
-            WHERE toDate(commit_at) <= addMonths(toDate('${date}'), -3)
+            WHERE toDate(commit_at) >= addMonths(toDate('${date}'), -3)
           )
           SELECT project_id, commit_id, commit_at, data_id 
           FROM latest_commits
