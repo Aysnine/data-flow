@@ -35,14 +35,17 @@ const DWS_PROJECT_METRIC_KEYS = [
   "bug_q4_days_in_1m",
 ];
 
-const db = createClient({
-  url: "http://localhost:8123",
-  username: "default",
-  password: "",
-  database: "default",
-});
+function getDb() {
+  return createClient({
+    url: "http://localhost:8123",
+    username: "default",
+    password: "",
+    database: "default",
+  });
+}
 
 async function make_ods_jira_issues(date: string) {
+  const db = getDb();
   const now = dayjs();
 
   const generateRandomRange = (min: number, max: number) => Math.floor(Math.random() * (max - min)) + min;
@@ -104,6 +107,8 @@ async function make_ods_jira_issues(date: string) {
 }
 
 async function make_ods_git_commits(date: string) {
+  const db = getDb();
+  const now = dayjs();
   const generateRandomRange = (min: number, max: number) => Math.floor(Math.random() * (max - min)) + min;
   const generateRandomString = () => Math.random().toString(36).substring(2, 15);
 
@@ -129,10 +134,7 @@ async function make_ods_git_commits(date: string) {
         .map(() => uuidv4())
     ),
     commit_at: pl.Series("commit_at", Array(DAILY_GIT_COMMIT_COUNT).fill(Math.floor(new Date(date).getTime() / 1000))),
-    data_created_at: pl.Series(
-      "data_created_at",
-      Array(DAILY_GIT_COMMIT_COUNT).fill(Math.floor(new Date(date).getTime() / 1000))
-    ),
+    data_created_at: pl.Series("data_created_at", Array(DAILY_GIT_COMMIT_COUNT).fill(now.unix())),
     project_id: generateSeries("project_id", DAILY_GIT_COMMIT_COUNT, () =>
       generateRandomRange(PROJECT_ID_RANGE[0], PROJECT_ID_RANGE[1])
     ),
@@ -148,6 +150,7 @@ async function make_ods_git_commits(date: string) {
 }
 
 async function make_dwd_jira_issues(date: string) {
+  const db = getDb();
   const now = dayjs();
 
   const odsData = await db.query({
@@ -187,7 +190,6 @@ async function make_dwd_jira_issues(date: string) {
     const metrics = generateMetrics();
     return {
       ...record,
-      issue_created_at: record.data_created_at,
       "metrics.keys": metrics.keys,
       "metrics.values": metrics.values,
     };
@@ -216,6 +218,7 @@ async function make_dwd_jira_issues(date: string) {
 }
 
 async function make_dwd_git_commits(date: string) {
+  const db = getDb();
   const now = dayjs();
 
   const odsData = await db.query({
@@ -282,6 +285,9 @@ async function make_dwd_git_commits(date: string) {
 }
 
 async function make_dwm_bugs(date: string) {
+  const db = getDb();
+  const now = dayjs();
+
   const dwdData = await db.query({
     query: `
       SELECT *
@@ -306,14 +312,14 @@ async function make_dwm_bugs(date: string) {
     return {
       metrics_date: date,
       project_id: record.project_id,
-      issue_id: record.issue_id,
+      bug_id: record.issue_id,
       bug_created_at: record.issue_created_at,
       bug_updated_at: record.issue_updated_at,
       bug_resolution_date: record.issue_resolution_date,
       "metrics.keys": DWM_BUG_METRIC_KEYS,
       "metrics.values": [bugDays.toString()],
       data_id: uuidv4(),
-      data_created_at: Math.floor(new Date(date).getTime() / 1000),
+      data_created_at: now.unix(),
     };
   });
 
@@ -324,7 +330,7 @@ async function make_dwm_bugs(date: string) {
       format: "JSONEachRow",
     });
     const lineageRecords = dwmRecords.map((dwmRecord: any) => {
-      const sourceRecord = records.find((r: any) => r.issue_id === dwmRecord.issue_id) as { data_id: string };
+      const sourceRecord = records.find((r: any) => r.issue_id === dwmRecord.bug_id) as { data_id: string };
       return {
         from_table: "dwd_jira_issues",
         from_ids: [sourceRecord.data_id],
@@ -343,145 +349,251 @@ async function make_dwm_bugs(date: string) {
   }
 }
 
-async function make_dws_projects(date: string) {
+async function make_dws_projects(date: string): Promise<
+  {
+    from_table: string;
+    from_ids: string[];
+    to_table: string;
+    to_id: string;
+    to_facets: string[];
+    created_at: number;
+  }[]
+> {
   const now = dayjs();
+  const db = getDb();
 
-  // 获取最近3个月的commit数据
-  const commitDf = pl.DataFrame(
-    await db
+  // 获取原始数据，同时获取data_id
+  const [gitData, issueData, bugData] = await Promise.all([
+    db
       .query({
         query: `
-          WITH latest_commits AS (
-            SELECT
-              project_id, commit_id, commit_at, data_id,
-              ROW_NUMBER()
-                OVER (PARTITION BY commit_id ORDER BY data_created_at DESC) as rn
-            FROM dwd_git_commits
-            WHERE toDate(commit_at) >= addMonths(toDate('${date}'), -3)
-          )
-          SELECT project_id, commit_id, commit_at, data_id 
-          FROM latest_commits
-          WHERE rn = 1
-        `,
+        WITH latest_commits AS (
+          SELECT project_id, commit_id, commit_at, data_id, ROW_NUMBER() OVER (PARTITION BY commit_id ORDER BY data_created_at DESC) as rn
+          FROM dwd_git_commits
+          WHERE toDate(commit_at) >= addMonths(toDate('${date}'), -3)
+        )
+        SELECT project_id, commit_id, commit_at as date, data_id 
+        FROM latest_commits
+        WHERE rn = 1
+      `,
         format: "JSONEachRow",
       })
       .then((res) => res.json()),
-    {
-      orient: "col",
-      schema: {
-        project_id: pl.Utf8,
-        commit_id: pl.Utf8,
-        commit_at: pl.Datetime("ms"),
-        data_id: pl.Utf8,
-      },
-      columns: ["project_id", "commit_id", "commit_at", "data_id"],
-    }
-  );
 
-  const commitMetricsIn1MonthByProject = commitDf
-    .filter(pl.col("commit_at").gt(dayjs(date).subtract(1, "month").unix()))
-    .groupBy("project_id")
-    .agg(
-      pl.col("data_id").count().alias("commit_count_in_1m"),
-      pl.col("data_id").list().alias("commit_count_in_1m__data_ids")
+    db
+      .query({
+        query: `
+        WITH latest_issues AS (
+          SELECT project_id, issue_created_at, data_id, ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY data_created_at DESC) as rn
+          FROM dwd_jira_issues
+          WHERE toDate(issue_created_at) >= addMonths(toDate('${date}'), -3)
+        )
+        SELECT project_id, issue_created_at as date, data_id
+        FROM latest_issues
+        WHERE rn = 1
+      `,
+        format: "JSONEachRow",
+      })
+      .then((res) => res.json()),
+
+    db
+      .query({
+        query: `
+        WITH latest_bugs AS (
+          SELECT project_id, bug_created_at, data_id, ROW_NUMBER() OVER (PARTITION BY bug_id ORDER BY data_created_at DESC) as rn
+          FROM dwm_bugs
+          WHERE toDate(bug_created_at) >= addMonths(toDate('${date}'), -3)
+        )
+        SELECT project_id, bug_created_at as date, data_id
+        FROM latest_bugs
+        WHERE rn = 1
+      `,
+        format: "JSONEachRow",
+      })
+      .then((res) => res.json()),
+  ]);
+
+  const projectIds = new Set([
+    ...gitData.map((r: any) => r.project_id),
+    ...issueData.map((r: any) => r.project_id),
+    ...bugData.map((r: any) => r.project_id),
+  ]);
+  const dwsRecords = Array.from(projectIds).map((projectId) => {
+    // Git提交统计
+    const projectGitData = gitData.filter((r: any) => r.project_id === projectId);
+    const gitData1m = projectGitData.filter(
+      (r: any) => dayjs(r.date).format("YYYY-MM-DD") === dayjs(date).format("YYYY-MM-DD")
+    );
+    const gitData3m = projectGitData.filter(
+      (r: any) => dayjs(r.date).format("YYYY-MM-DD") === dayjs(date).format("YYYY-MM-DD")
+    );
+    const commit_count_1m = gitData1m.length;
+    const commit_count_3m = gitData3m.length;
+
+    // Issue统计
+    const projectIssueData = issueData.filter((r: any) => r.project_id === projectId);
+    const issueData1m = projectIssueData.filter(
+      (r: any) => dayjs(r.date).format("YYYY-MM-DD") === dayjs(date).format("YYYY-MM-DD")
+    );
+    const issueData3m = projectIssueData.filter(
+      (r: any) => dayjs(r.date).format("YYYY-MM-DD") === dayjs(date).format("YYYY-MM-DD")
+    );
+    const issue_count_1m = issueData1m.length;
+    const issue_count_3m = issueData3m.length;
+    // Bug统计
+    const projectBugData = bugData.filter((r: any) => r.project_id === projectId);
+    const bugData1m = projectBugData.filter(
+      (r: any) => dayjs(r.date).format("YYYY-MM-DD") === dayjs(date).format("YYYY-MM-DD")
+    );
+    const bugData3m = projectBugData.filter(
+      (r: any) => dayjs(r.date).format("YYYY-MM-DD") === dayjs(date).format("YYYY-MM-DD")
     );
 
-  // // 获取最近3个月的issue数据
-  // const issueDf = pl.DataFrame(
-  //   await db
-  //     .query({
-  //       query: `
-  //         WITH latest_issues AS (
-  //           SELECT
-  //             project_id, issue_created_at, data_id,
-  //             ROW_NUMBER()
-  //               OVER (PARTITION BY issue_id ORDER BY data_created_at DESC) as rn
-  //           FROM dwd_jira_issues
-  //           WHERE toDate(issue_created_at) >= addMonths(toDate('${date}'), -3)
-  //         )
-  //         SELECT project_id, issue_created_at as date, data_id
-  //         FROM latest_issues
-  //         WHERE rn = 1
-  //       `,
-  //       format: "JSONEachRow",
-  //     })
-  //     .then((res) => res.json())
-  // );
-  // // 获取最近3个月的bug数据
-  // const bugDf = pl.DataFrame(
-  //   await db
-  //     .query({
-  //       query: `
-  //         WITH latest_bugs AS (
-  //           SELECT
-  //             project_id, bug_created_at, data_id,
-  //             ROW_NUMBER()
-  //               OVER (PARTITION BY issue_id ORDER BY data_created_at DESC) as rn
-  //           FROM dwm_bugs
-  //           WHERE
-  //             toDate(bug_created_at) >= addMonths(toDate('${date}'), -3)
-  //             OR toDate(bug_updated_at) >= addMonths(toDate('${date}'), -3)
-  //             OR toDate(bug_resolution_date) >= addMonths(toDate('${date}'), -3)
-  //         )
-  //         SELECT project_id, bug_created_at as date, data_id
-  //         FROM latest_bugs
-  //         WHERE rn = 1
-  //     `,
-  //       format: "JSONEachRow",
-  //     })
-  //     .then((res) => res.json())
-  // );
+    const getBugDays = (data: any[]) =>
+      data.map((r: any) => {
+        if (!r["metrics.keys"] || !r["metrics.values"]) return 0;
+        const index = r["metrics.keys"].indexOf("bug_days");
+        return index >= 0 ? Number(r["metrics.values"][index]) || 0 : 0;
+      });
 
-  // const issueMetricsIn1MonthByProject = issueDf
-  //   .filter(pl.col("issue_created_at").gt(dayjs(date).subtract(1, "month").unix()))
-  //   .groupBy("project_id")
-  //   .agg(
-  //     pl.col("data_id").count().alias("issue_added_count_in_1m"),
-  //     pl.col("data_id").list().alias("issue_added_count_in_1m__data_ids")
-  //   );
+    const bug_days_1m = getBugDays(bugData1m);
+    const bug_days_3m = getBugDays(bugData3m);
 
-  // const bugMetricsIn1MonthByProject = bugDf
-  //   .filter(pl.col("bug_created_at").gt(dayjs(date).subtract(1, "month").unix()))
-  //   .groupBy("project_id")
-  //   .agg(
-  //     pl.col("data_id").mean().alias("bug_avg_days_in_1m"),
-  //     pl.col("data_id").quantile(0.25).alias("bug_q0_days_in_1m"),
-  //     pl.col("data_id").quantile(0.5).alias("bug_q1_days_in_1m"),
-  //     pl.col("data_id").quantile(0.75).alias("bug_q2_days_in_1m"),
-  //     pl.col("data_id").quantile(0.9).alias("bug_q3_days_in_1m"),
-  //     pl.col("data_id").quantile(1).alias("bug_q4_days_in_1m"),
-  //     pl.col("data_id").list().alias("bug_avg_days_in_1m__data_ids")
-  //   );
+    const bug_avg_days_1m =
+      bug_days_1m.length > 0
+        ? (bug_days_1m.reduce((a: number, b: number) => a + b, 0) / bug_days_1m.length).toFixed(2)
+        : "0.00";
+    const bug_avg_days_3m =
+      bug_days_3m.length > 0
+        ? (bug_days_3m.reduce((a: number, b: number) => a + b, 0) / bug_days_3m.length).toFixed(2)
+        : "0.00";
+    // 计算分位数
+    const sorted_bug_days_1m = bug_days_1m.sort((a, b) => a - b);
+    const q0 = sorted_bug_days_1m.length > 0 ? sorted_bug_days_1m[0].toFixed(2) : "0.00";
+    const q1 =
+      sorted_bug_days_1m.length > 0
+        ? sorted_bug_days_1m[Math.floor(sorted_bug_days_1m.length * 0.25)].toFixed(2)
+        : "0.00";
+    const q2 =
+      sorted_bug_days_1m.length > 0
+        ? sorted_bug_days_1m[Math.floor(sorted_bug_days_1m.length * 0.5)].toFixed(2)
+        : "0.00";
+    const q3 =
+      sorted_bug_days_1m.length > 0
+        ? sorted_bug_days_1m[Math.floor(sorted_bug_days_1m.length * 0.75)].toFixed(2)
+        : "0.00";
+    const q4 = sorted_bug_days_1m.length > 0 ? sorted_bug_days_1m[sorted_bug_days_1m.length - 1].toFixed(2) : "0.00";
 
-  // const projectIds = Array.from(
-  //   { length: PROJECT_ID_RANGE[1] - PROJECT_ID_RANGE[0] + 1 },
-  //   (_, i) => PROJECT_ID_RANGE[0] + i
-  // );
+    return {
+      metrics_date: date,
+      project_id: projectId,
+      "metrics.keys": DWS_PROJECT_METRIC_KEYS,
+      "metrics.values": [
+        commit_count_1m.toString(),
+        commit_count_3m.toString(),
+        issue_count_1m.toString(),
+        issue_count_3m.toString(),
+        bug_avg_days_1m,
+        bug_avg_days_3m,
+        q0,
+        q1,
+        q2,
+        q3,
+        q4,
+      ],
+      data_id: uuidv4(),
+      data_created_at: now.unix(),
+      // 保存源数据ID用于生成血缘关系
+      _source: {
+        gitData1m: gitData1m.map((r: any) => r.data_id),
+        gitData3m: gitData3m.map((r: any) => r.data_id),
+        issueData1m: issueData1m.map((r: any) => r.data_id),
+        issueData3m: issueData3m.map((r: any) => r.data_id),
+        bugData1m: bugData1m.map((r: any) => r.data_id),
+        bugData3m: bugData3m.map((r: any) => r.data_id),
+      },
+    };
+  });
 
-  // const dwsRecords = projectIds.map((projectId) => {
-  //   const commitMetrics = commitMetricsIn1MonthByProject.filter(pl.col("project_id").eq(pl.lit(projectId)));
-  //   const issueMetrics = issueMetricsIn1MonthByProject.filter(pl.col("project_id").eq(pl.lit(projectId)));
-  //   const bugMetrics = bugMetricsIn1MonthByProject.filter(pl.col("project_id").eq(pl.lit(projectId)));
+  if (dwsRecords.length > 0) {
+    // 插入数据到 dws 表
+    await db.insert({
+      table: "dws_projects",
+      values: dwsRecords.map(({ _source, ...record }) => record),
+      format: "JSONEachRow",
+    });
 
-  //   return {
-  //     metrics_date: date,
-  //     project_id: projectId,
-  //     "metrics.keys": DWS_PROJECT_METRIC_KEYS,
-  //     "metrics.values": [
-  //       commitMetrics.getColumn("commit_count_in_1m").toArray()[0],
-  //       issueMetrics.getColumn("issue_added_count_in_1m").toArray()[0],
-  //       bugMetrics.getColumn("bug_avg_days_in_1m").toArray()[0],
-  //     ],
-  //     data_id: uuidv4(),
-  //     data_created_at: now.unix(),
-  //   };
-  // });
+    // 生成更详细的数据血缘关系
+    const lineageRecords = dwsRecords.flatMap((dwsRecord: any) => {
+      return [
+        {
+          from_table: "dwd_git_commits",
+          from_ids: dwsRecord._source.gitData1m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["commit_count_in_1m"],
+          created_at: now.unix(),
+        },
+        {
+          from_table: "dwd_git_commits",
+          from_ids: dwsRecord._source.gitData3m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["commit_count_in_3m"],
+          created_at: now.unix(),
+        },
+        {
+          from_table: "dwd_jira_issues",
+          from_ids: dwsRecord._source.issueData1m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["issue_added_count_in_1m"],
+          created_at: now.unix(),
+        },
+        {
+          from_table: "dwd_jira_issues",
+          from_ids: dwsRecord._source.issueData3m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["issue_added_count_in_3m"],
+          created_at: now.unix(),
+        },
+        {
+          from_table: "dwm_bugs",
+          from_ids: dwsRecord._source.bugData1m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: [
+            "bug_avg_days_in_1m",
+            "bug_q0_days_in_1m",
+            "bug_q1_days_in_1m",
+            "bug_q2_days_in_1m",
+            "bug_q3_days_in_1m",
+            "bug_q4_days_in_1m",
+          ],
+          created_at: now.unix(),
+        },
+        {
+          from_table: "dwm_bugs",
+          from_ids: dwsRecord._source.bugData3m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["bug_avg_days_in_3m"],
+          created_at: now.unix(),
+        },
+      ];
+    });
 
-  // await db.insert({
-  //   table: "dws_projects",
-  //   values: dwsRecords,
-  //   format: "JSONEachRow",
-  // });
+    await db.insert({
+      table: "data_lineage",
+      values: lineageRecords,
+      format: "JSONEachRow",
+    });
+
+    return lineageRecords;
+  }
+
+  return [];
 }
 
 async function get_data_lineage(root_record: {
@@ -492,6 +604,8 @@ async function get_data_lineage(root_record: {
   from_ids: string[];
   created_at: number;
 }) {
+  const db = getDb();
+
   // 递归查询数据血缘关系
   const lineageRecords = [root_record];
   const visited = new Set<string>();

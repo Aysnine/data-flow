@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS dwd_git_commits (
 ) ENGINE = MergeTree();
 CREATE TABLE IF NOT EXISTS dwm_bugs (
   project_id String,
-  issue_id String,
+  bug_id String,
   bug_created_at DateTime,
   bug_updated_at DateTime,
   bug_resolution_date Nullable(DateTime),
