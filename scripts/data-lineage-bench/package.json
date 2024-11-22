@@ -2,6 +2,11 @@
   "name": "data-lineage-bench",
   "module": "index.ts",
   "type": "module",
+  "scripts": {
+    "clean": "bun run clean.ts",
+    "make": "bun run index.ts",
+    "remake": "bun run clean.ts && bun run index.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

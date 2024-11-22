@@ -4,13 +4,13 @@ import { v4 as uuidv4 } from "uuid";
 import dayjs from "dayjs";
 
 const SIMULATION_DATE_START_DATE = "2024-01-01";
-const SIMULATION_DATE_END_DATE = "2024-01-02";
-const DAILY_JIRA_ISSUE_DATA_COUNT = 10;
+const SIMULATION_DATE_END_DATE = "2025-01-01";
+const DAILY_JIRA_ISSUE_DATA_COUNT = 200;
 const PROJECT_ID_RANGE = [1, 10];
-const ISSUE_ID_RANGE = [1, 99];
+const ISSUE_ID_RANGE = [1, 99999];
 const ISSUE_TYPE_RANGE = ["bug", "task", "story"];
 const ISSUE_STATUS_RANGE = ["open", "in-progress", "resolved", "closed"];
-const DAILY_GIT_COMMIT_COUNT = 10;
+const DAILY_GIT_COMMIT_COUNT = 100;
 const COMMIT_MESSAGE_TEMPLATES = [
   "fix: 修复bug #",
   "feat: 添加新功能 #",
@@ -33,6 +33,7 @@ const DWS_PROJECT_METRIC_KEYS = [
   "bug_q2_days_in_1m",
   "bug_q3_days_in_1m",
   "bug_q4_days_in_1m",
+  "issue_bug_days_percentage_in_1m",
 ];
 
 function getDb() {
@@ -484,6 +485,11 @@ async function make_dws_projects(date: string): Promise<
         : "0.00";
     const q4 = sorted_bug_days_1m.length > 0 ? sorted_bug_days_1m[sorted_bug_days_1m.length - 1].toFixed(2) : "0.00";
 
+    const issue_bug_days_percentage_1m =
+      bug_days_1m.length > 0
+        ? ((bug_days_1m.reduce((a: number, b: number) => a + b, 0) / issue_count_1m) * 100).toFixed(2)
+        : "0.00";
+
     return {
       metrics_date: date,
       project_id: projectId,
@@ -500,6 +506,7 @@ async function make_dws_projects(date: string): Promise<
         q2,
         q3,
         q4,
+        issue_bug_days_percentage_1m,
       ],
       data_id: uuidv4(),
       data_created_at: now.unix(),
@@ -581,6 +588,22 @@ async function make_dws_projects(date: string): Promise<
           to_facets: ["bug_avg_days_in_3m"],
           created_at: now.unix(),
         },
+        {
+          from_table: "dwd_jira_issues",
+          from_ids: dwsRecord._source.issueData1m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["issue_bug_days_percentage_in_1m"],
+          created_at: now.unix(),
+        },
+        {
+          from_table: "dwm_bugs",
+          from_ids: dwsRecord._source.bugData1m,
+          to_table: "dws_projects",
+          to_id: dwsRecord.data_id,
+          to_facets: ["issue_bug_days_percentage_in_1m"],
+          created_at: now.unix(),
+        },
       ];
     });
 
@@ -596,74 +619,117 @@ async function make_dws_projects(date: string): Promise<
   return [];
 }
 
-async function get_data_lineage(root_record: {
-  to_id: string;
-  to_table: string;
-  to_facets: string[];
-  from_table: string;
-  from_ids: string[];
-  created_at: number;
-}) {
+async function print_dws_projects_latest() {
   const db = getDb();
 
-  // 递归查询数据血缘关系
-  const lineageRecords = [root_record];
-  const visited = new Set<string>();
+  async function get_metric_lineage(data_id: string, metric_name: string) {
+    const db = getDb();
 
-  async function getLineage(record: typeof root_record) {
-    const key = `${record.from_table}_${record.from_ids.join(",")}`;
-    if (visited.has(key)) {
-      return;
-    }
-    visited.add(key);
-
-    const childRecords = await db
+    const lineageRecords = await db
       .query({
         query: `
-        SELECT * FROM data_lineage 
-        WHERE to_table = '${record.from_table}' 
-        AND to_id IN (${record.from_ids.map((id) => `'${id}'`).join(",")})
-      `,
+          SELECT from_table, from_ids 
+          FROM data_lineage 
+          WHERE to_id = '${data_id}' 
+            AND has(to_facets, '${metric_name}')
+        `,
         format: "JSONEachRow",
       })
-      .then((res) => res.json());
+      .then((res) => res.json<{ from_table: string; from_ids: string[] }>());
 
-    if (childRecords.length > 0) {
-      lineageRecords.push(...(childRecords as (typeof root_record)[]));
-
-      // 递归查询每条记录
-      await Promise.all(childRecords.map((r) => getLineage(r as typeof root_record)));
-    }
+    return lineageRecords;
   }
 
-  await getLineage(root_record);
-  return lineageRecords;
+  async function get_metric_lineage_specific_from_table(data_id: string, metric_name: string, from_table: string) {
+    const db = getDb();
+
+    const lineageRecords = await db
+      .query({
+        query: `
+          SELECT from_ids 
+          FROM data_lineage 
+          WHERE to_id = '${data_id}' 
+            AND has(to_facets, '${metric_name}') 
+            AND from_table = '${from_table}'
+        `,
+        format: "JSONEachRow",
+      })
+      .then((res) => res.json<{ from_ids: string[] }>());
+
+    return lineageRecords;
+  }
+
+  // query dws_projects
+  const dwsProjects = await db
+    .query({
+      query: `
+        SELECT *
+        FROM (
+          SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY metrics_date DESC) as rn
+          FROM dws_projects
+        ) t
+        WHERE rn = 1
+      `,
+      format: "JSONEachRow",
+    })
+    .then((res) => res.json<{ data_id: string; "metrics.keys": string[] }>());
+
+  // query data_lineage by from_table
+  for (const dwsProject of dwsProjects) {
+    console.log(`dwsProject: ${dwsProject.data_id}`);
+    const dwsProjectMetricsKeys = dwsProject["metrics.keys"];
+    const metricLineage = new Map();
+    for (const metricKey of dwsProjectMetricsKeys) {
+      const lineageRecords = await get_metric_lineage(dwsProject.data_id, metricKey);
+      const facetLineages = [];
+
+      for (const lineageRecord of lineageRecords) {
+        facetLineages.push({
+          from_table: lineageRecord.from_table,
+          from_ids: lineageRecord.from_ids,
+        });
+      }
+
+      if (metricLineage.has(metricKey)) {
+        metricLineage.get(metricKey).push(...facetLineages);
+      } else {
+        metricLineage.set(metricKey, facetLineages);
+      }
+    }
+
+    console.table(
+      Array.from(metricLineage.entries()).map(([metricKey, facetLineages]) => ({
+        metricKey,
+        tables: facetLineages.map((f: any) => f.from_table),
+        idsCount: facetLineages.map((f: any) => f.from_ids.length),
+      }))
+    );
+  }
 }
 
 async function main() {
-  await Promise.all([
-    make_ods_jira_issues(SIMULATION_DATE_START_DATE),
-    make_ods_git_commits(SIMULATION_DATE_START_DATE),
-  ]);
-  console.log("Generate ods data done");
+  const startDate = dayjs(SIMULATION_DATE_START_DATE);
+  const endDate = dayjs(SIMULATION_DATE_END_DATE);
 
-  await Promise.all([
-    make_dwd_jira_issues(SIMULATION_DATE_START_DATE),
-    make_dwd_git_commits(SIMULATION_DATE_START_DATE),
-  ]);
-  console.log("Generate dwd data done");
+  for (let date = startDate; date.isBefore(endDate); date = date.add(1, "day")) {
+    await Promise.all([
+      make_ods_jira_issues(date.format("YYYY-MM-DD")),
+      make_ods_git_commits(date.format("YYYY-MM-DD")),
+    ]);
+    await Promise.all([
+      make_dwd_jira_issues(date.format("YYYY-MM-DD")),
+      make_dwd_git_commits(date.format("YYYY-MM-DD")),
+    ]);
+    await make_dwm_bugs(date.format("YYYY-MM-DD"));
+  }
 
-  await make_dwm_bugs(SIMULATION_DATE_START_DATE);
-  console.log("Generate dwm data done");
-
-  const topRecords = await make_dws_projects(SIMULATION_DATE_START_DATE);
+  for (let date = startDate; date.isBefore(endDate); date = date.add(1, "day")) {
+    await make_dws_projects(date.format("YYYY-MM-DD"));
+  }
   console.log("Generate dws data done");
 
-  // for (const record of topRecords) {
-  //   await get_data_lineage(record);
-  // }
-
-  console.log("Generate data done");
+  await print_dws_projects_latest();
 }
 
 main().catch(console.error);
