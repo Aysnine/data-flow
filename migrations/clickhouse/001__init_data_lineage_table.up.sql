@@ -8,12 +8,11 @@ CREATE TABLE IF NOT EXISTS data_lineage (
   from_ids Array(String),
   created_at DateTime DEFAULT now(),
   -- 为常用的查询条件组合创建复合跳数索引
-  INDEX idx_main (to_table, to_id, from_table) TYPE minmax GRANULARITY 4,
+  INDEX idx_main (to_id, from_table) TYPE minmax GRANULARITY 4,
   -- facets 索引
-  INDEX idx_facet_keys to_facets TYPE
-  set(0) GRANULARITY 1,
-    -- from_ids 索引
-    INDEX idx_from_ids from_ids TYPE bloom_filter(0.01) GRANULARITY 1
+  INDEX idx_facet_keys to_facets TYPE bloom_filter(0.01) GRANULARITY 1,
+  -- from_ids 索引
+  INDEX idx_from_ids from_ids TYPE bloom_filter(0.01) GRANULARITY 1
 ) ENGINE = MergeTree() -- 使用 MergeTree 引擎，支持分区、排序和索引
 PARTITION BY to_table -- 按 to_table 分区,可以提高查询性能
 ORDER BY (to_table, to_id, from_table) -- 按 to_table, to_id, from_table 排序

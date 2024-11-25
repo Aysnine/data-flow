@@ -5,7 +5,8 @@
   "scripts": {
     "clean": "bun run clean.ts",
     "make": "bun run index.ts",
-    "remake": "bun run clean.ts && bun run index.ts"
+    "remake": "bun run clean.ts && bun run index.ts",
+    "dev": "bun run index.ts --watch"
   },
   "devDependencies": {
     "@types/bun": "latest"
@@ -15,8 +16,13 @@
   },
   "dependencies": {
     "@clickhouse/client": "^1.8.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "dayjs": "^1.11.13",
     "nodejs-polars": "^0.16.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.13.3",
     "uuid": "^11.0.3"
   }
 }

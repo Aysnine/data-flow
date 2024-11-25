@@ -2,11 +2,14 @@ import { createClient } from "@clickhouse/client";
 import pl from "nodejs-polars";
 import { v4 as uuidv4 } from "uuid";
 import dayjs from "dayjs";
+import { mkdir, writeFile, copyFile } from "node:fs/promises";
+
+const ODS_LINEAGE = false;
 
 const SIMULATION_DATE_START_DATE = "2024-01-01";
-const SIMULATION_DATE_END_DATE = "2025-01-01";
-const DAILY_JIRA_ISSUE_DATA_COUNT = 200;
-const PROJECT_ID_RANGE = [1, 10];
+const SIMULATION_DATE_END_DATE = "2024-12-31";
+const DAILY_JIRA_ISSUE_DATA_COUNT = 100;
+const PROJECT_ID_RANGE = [1, 100];
 const ISSUE_ID_RANGE = [1, 99999];
 const ISSUE_TYPE_RANGE = ["bug", "task", "story"];
 const ISSUE_STATUS_RANGE = ["open", "in-progress", "resolved", "closed"];
@@ -18,9 +21,15 @@ const COMMIT_MESSAGE_TEMPLATES = [
   "refactor: 重构代码 #",
   "test: 添加测试用例 #",
 ];
-const METRIC_KEYS = ["total_days", "dev_days", "ba_days", "qa_days", "over_days"];
+
+const ISSUE_METRIC_KEYS = ["total_days", "dev_days", "ba_days", "qa_days", "over_days"];
+const ISSUE_METRIC_MORE = 5 * 4;
+
 const GIT_METRIC_KEYS = ["code_lines_added", "code_lines_deleted", "files_changed", "review_hours", "discussion_count"];
+
 const DWM_BUG_METRIC_KEYS = ["bug_days"];
+const DWM_BUG_METRIC_MORE = 5 * 4;
+
 const DWS_PROJECT_METRIC_KEYS = [
   "commit_count_in_1m",
   "commit_count_in_3m",
@@ -35,6 +44,7 @@ const DWS_PROJECT_METRIC_KEYS = [
   "bug_q4_days_in_1m",
   "issue_bug_days_percentage_in_1m",
 ];
+const DWS_PROJECT_METRIC_MORE = 5 * 4;
 
 function getDb() {
   return createClient({
@@ -176,19 +186,21 @@ async function make_dwd_jira_issues(date: string) {
     const over_days = +Math.max(0, total_days - (dev_days + ba_days + qa_days)).toFixed(2); // 超出天数
 
     return {
-      keys: METRIC_KEYS,
+      keys: [...ISSUE_METRIC_KEYS, ...Array.from({ length: ISSUE_METRIC_MORE }).map((_, i) => `metric_fake_${i}`)],
       values: [
         total_days.toString(),
         dev_days.toString(),
         ba_days.toString(),
         qa_days.toString(),
         over_days.toString(),
+        ...Array.from({ length: ISSUE_METRIC_MORE }).map((_, i) => Math.random().toFixed(2)),
       ],
     };
   };
 
   const dwdRecords = records.map((record: any) => {
     const metrics = generateMetrics();
+
     return {
       ...record,
       "metrics.keys": metrics.keys,
@@ -202,20 +214,22 @@ async function make_dwd_jira_issues(date: string) {
     format: "JSONEachRow",
   });
 
-  const lineageRecords = dwdRecords.map((record: any) => ({
-    from_table: "ods_jira_issues",
-    from_ids: [record.data_id],
-    to_table: "dwd_jira_issues",
-    to_id: record.data_id,
-    to_to_facets: METRIC_KEYS,
-    created_at: now.unix(),
-  }));
+  if (ODS_LINEAGE) {
+    const lineageRecords = dwdRecords.map((record: any) => ({
+      from_table: "ods_jira_issues",
+      from_ids: [record.data_id],
+      to_table: "dwd_jira_issues",
+      to_id: record.data_id,
+      to_to_facets: record["metrics.keys"],
+      created_at: now.unix(),
+    }));
 
-  await db.insert({
-    table: "data_lineage",
-    values: lineageRecords,
-    format: "JSONEachRow",
-  });
+    await db.insert({
+      table: "data_lineage",
+      values: lineageRecords,
+      format: "JSONEachRow",
+    });
+  }
 }
 
 async function make_dwd_git_commits(date: string) {
@@ -269,20 +283,22 @@ async function make_dwd_git_commits(date: string) {
     format: "JSONEachRow",
   });
 
-  const lineageRecords = dwdRecords.map((record: any) => ({
-    from_table: "ods_git_commits",
-    from_ids: [record.data_id],
-    to_table: "dwd_git_commits",
-    to_id: record.data_id,
-    to_facets: GIT_METRIC_KEYS,
-    created_at: now.unix(),
-  }));
+  if (ODS_LINEAGE) {
+    const lineageRecords = dwdRecords.map((record: any) => ({
+      from_table: "ods_git_commits",
+      from_ids: [record.data_id],
+      to_table: "dwd_git_commits",
+      to_id: record.data_id,
+      to_facets: GIT_METRIC_KEYS,
+      created_at: now.unix(),
+    }));
 
-  await db.insert({
-    table: "data_lineage",
-    values: lineageRecords,
-    format: "JSONEachRow",
-  });
+    await db.insert({
+      table: "data_lineage",
+      values: lineageRecords,
+      format: "JSONEachRow",
+    });
+  }
 }
 
 async function make_dwm_bugs(date: string) {
@@ -317,8 +333,14 @@ async function make_dwm_bugs(date: string) {
       bug_created_at: record.issue_created_at,
       bug_updated_at: record.issue_updated_at,
       bug_resolution_date: record.issue_resolution_date,
-      "metrics.keys": DWM_BUG_METRIC_KEYS,
-      "metrics.values": [bugDays.toString()],
+      "metrics.keys": [
+        ...DWM_BUG_METRIC_KEYS,
+        ...Array.from({ length: DWM_BUG_METRIC_MORE }).map((_, i) => `metric_fake_${i}_days`),
+      ],
+      "metrics.values": [
+        bugDays.toString(),
+        ...Array.from({ length: DWM_BUG_METRIC_MORE }).map(() => Math.random().toFixed(2)),
+      ],
       data_id: uuidv4(),
       data_created_at: now.unix(),
     };
@@ -337,7 +359,7 @@ async function make_dwm_bugs(date: string) {
         from_ids: [sourceRecord.data_id],
         to_table: "dwm_bugs",
         to_id: dwmRecord.data_id,
-        to_facets: DWM_BUG_METRIC_KEYS,
+        to_facets: dwmRecord["metrics.keys"],
         created_at: Math.floor(new Date(date).getTime() / 1000),
       };
     });
@@ -493,7 +515,10 @@ async function make_dws_projects(date: string): Promise<
     return {
       metrics_date: date,
       project_id: projectId,
-      "metrics.keys": DWS_PROJECT_METRIC_KEYS,
+      "metrics.keys": [
+        ...DWS_PROJECT_METRIC_KEYS,
+        ...Array.from({ length: DWS_PROJECT_METRIC_MORE }).map((_, i) => `metric_fake_${i}`),
+      ],
       "metrics.values": [
         commit_count_1m.toString(),
         commit_count_3m.toString(),
@@ -507,6 +532,7 @@ async function make_dws_projects(date: string): Promise<
         q3,
         q4,
         issue_bug_days_percentage_1m,
+        ...Array.from({ length: DWS_PROJECT_METRIC_MORE }).map((_, i) => Math.random().toFixed(2)),
       ],
       data_id: uuidv4(),
       data_created_at: now.unix(),
@@ -604,6 +630,17 @@ async function make_dws_projects(date: string): Promise<
           to_facets: ["issue_bug_days_percentage_in_1m"],
           created_at: now.unix(),
         },
+
+        ...Array.from({ length: DWS_PROJECT_METRIC_MORE })
+          .map((_, i) => `metric_fake_${i}`)
+          .map((key) => ({
+            from_table: "dwd_jira_issues",
+            from_ids: dwsRecord._source.issueData1m,
+            to_table: "dws_projects",
+            to_id: dwsRecord.data_id,
+            to_facets: [key],
+            created_at: now.unix(),
+          })),
       ];
     });
 
@@ -619,7 +656,7 @@ async function make_dws_projects(date: string): Promise<
   return [];
 }
 
-async function print_dws_projects_latest() {
+async function query_dws_projects_latest() {
   const db = getDb();
 
   async function get_metric_lineage(data_id: string, metric_name: string) {
@@ -677,7 +714,7 @@ async function print_dws_projects_latest() {
 
   // query data_lineage by from_table
   for (const dwsProject of dwsProjects) {
-    console.log(`dwsProject: ${dwsProject.data_id}`);
+    // console.log(`dwsProject: ${dwsProject.data_id}`);
     const dwsProjectMetricsKeys = dwsProject["metrics.keys"];
     const metricLineage = new Map();
     for (const metricKey of dwsProjectMetricsKeys) {
@@ -698,13 +735,13 @@ async function print_dws_projects_latest() {
       }
     }
 
-    console.table(
-      Array.from(metricLineage.entries()).map(([metricKey, facetLineages]) => ({
-        metricKey,
-        tables: facetLineages.map((f: any) => f.from_table),
-        idsCount: facetLineages.map((f: any) => f.from_ids.length),
-      }))
-    );
+    // console.table(
+    //   Array.from(metricLineage.entries()).map(([metricKey, facetLineages]) => ({
+    //     metricKey,
+    //     tables: facetLineages.map((f: any) => f.from_table),
+    //     idsCount: facetLineages.map((f: any) => f.from_ids.length),
+    //   }))
+    // );
   }
 }
 
@@ -712,24 +749,90 @@ async function main() {
   const startDate = dayjs(SIMULATION_DATE_START_DATE);
   const endDate = dayjs(SIMULATION_DATE_END_DATE);
 
-  for (let date = startDate; date.isBefore(endDate); date = date.add(1, "day")) {
-    await Promise.all([
-      make_ods_jira_issues(date.format("YYYY-MM-DD")),
-      make_ods_git_commits(date.format("YYYY-MM-DD")),
-    ]);
-    await Promise.all([
-      make_dwd_jira_issues(date.format("YYYY-MM-DD")),
-      make_dwd_git_commits(date.format("YYYY-MM-DD")),
-    ]);
-    await make_dwm_bugs(date.format("YYYY-MM-DD"));
-  }
+  const timings = [];
 
   for (let date = startDate; date.isBefore(endDate); date = date.add(1, "day")) {
-    await make_dws_projects(date.format("YYYY-MM-DD"));
-  }
-  console.log("Generate dws data done");
+    const dateStr = date.format("YYYY-MM-DD");
+    const startTime = Date.now();
 
-  await print_dws_projects_latest();
+    await Promise.all([make_ods_jira_issues(dateStr), make_ods_git_commits(dateStr)]);
+    await Promise.all([make_dwd_jira_issues(dateStr), make_dwd_git_commits(dateStr)]);
+    await make_dwm_bugs(dateStr);
+    await make_dws_projects(dateStr);
+
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+
+    // 查询各表的数据量和大小
+    const db = getDb();
+    const tableStats = await db.query({
+      query: `
+        SELECT 
+          database,
+          table,
+          sum(bytes) as total_bytes,
+          sum(rows) as total_rows,
+          count() as part_count
+        FROM system.parts
+        WHERE active = 1 AND database = 'default'
+        GROUP BY database, table
+        ORDER BY total_bytes DESC;
+      `,
+      format: "JSONEachRow",
+    });
+
+    timings.push({
+      date: dateStr,
+      duration_ms: duration,
+      table_stats: await tableStats.json(),
+    });
+  }
+
+  const resultDir = `./results/${dayjs().format("YYYY-MM-DD_HH-mm-ss")}`;
+  await mkdir(resultDir);
+  await copyFile("./app.html", `${resultDir}/index.html`);
+
+  // 将执行时间和表统计数据写入JSON文件
+  const outputJson = JSON.stringify(
+    {
+      args: {
+        SIMULATION_DATE_START_DATE,
+        SIMULATION_DATE_END_DATE,
+        ODS_LINEAGE,
+        DAILY_JIRA_ISSUE_DATA_COUNT,
+        PROJECT_ID_RANGE,
+        ISSUE_ID_RANGE,
+        DAILY_GIT_COMMIT_COUNT,
+        ISSUE_METRIC_KEYS,
+        ISSUE_METRIC_MORE,
+        GIT_METRIC_KEYS,
+        DWM_BUG_METRIC_KEYS,
+        DWM_BUG_METRIC_MORE,
+        DWS_PROJECT_METRIC_KEYS,
+        DWS_PROJECT_METRIC_MORE,
+      },
+      timings: timings.map((t) => ({
+        date: t.date,
+        duration_ms: t.duration_ms,
+        table_stats: t.table_stats,
+      })),
+    },
+    null,
+    2
+  );
+  await mkdir(resultDir, { recursive: true });
+
+  await Bun.build({
+    entrypoints: ["./app.tsx"],
+    outdir: `${resultDir}`,
+    define: {
+      "process.env.BENCHMARK_RESULTS": JSON.stringify(outputJson),
+    },
+  });
+
+  console.log("Generate data done");
+
+  // await query_dws_projects_latest();
 }
 
 main().catch(console.error);
